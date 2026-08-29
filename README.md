@@ -1,32 +1,27 @@
-# React + TypeScript + Vite
+# Decision Surface POC
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Spike: visualize a Rego policy's decision surface as a 2D grid.
 
-Currently, two official plugins are available:
+## Running
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Two processes. Terminal 1:
 
-## React Compiler
+    opa run --server --addr localhost:8181
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Terminal 2:
 
-## Expanding the Oxlint configuration
+    npm run dev
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+Vite proxies `/opa/*` to the OPA server (see `vite.config.ts`).
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
-```
+## Why a server and not wasm
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Regorus has no published npm package — `regorusjs` was published and
+unpublished on 2024-01-28, and nothing since. The wasm binding exists in
+the repo but is build-from-source only. Falling back to the real `opa`
+binary in server mode: policies are uploaded via `PUT /v1/policies/<id>`
+and evaluated via `POST /v1/data/<path>`.
+
+## Phase 0 proof
+
+    node scripts/phase0.mjs
