@@ -4,13 +4,17 @@ Spike: visualize a Rego policy's decision surface as a 2D grid.
 
 ## Running
 
-Two processes. Terminal 1:
+    npm start
 
-    opa run --server --addr localhost:8181
+That runs `scripts/dev.sh`, which starts the OPA server, waits for it to be
+healthy, then starts Vite. Ctrl+C stops both. An OPA already listening on the
+port is reused and left running on exit, so the script is safe to re-run.
+Override the port with `OPA_PORT=8282 npm start`.
 
-Terminal 2:
+To run the two halves yourself instead:
 
-    npm run dev
+    opa run --server --addr localhost:8181    # terminal 1
+    npm run dev                               # terminal 2
 
 Vite proxies `/opa/*` to the OPA server (see `vite.config.ts`).
 
