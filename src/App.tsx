@@ -1,144 +1,242 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import fixture from './fixtures/authz.rego?raw'
-import { loadPolicy, evaluate, type EvalResult } from './opa'
-import { extractFields, type Field, type Value } from './extract'
+import { loadPolicy, evaluatePackage, splitEntrypoint } from './opa'
+import { extractFields, type Value } from './extract'
+import { instrument, type RuleDef } from './instrument'
+import {
+  assignmentToInput,
+  buildSankey,
+  crossProduct,
+  enumeratePaths,
+  induceTree,
+  mapLimit,
+  planSweep,
+  type Row,
+  type Tree,
+} from './analyze'
+import { DecisionGraph, Sankey, decisionColor } from './Viz'
+import { showValue } from './show'
 
-type Kind = 'true' | 'false' | 'empty' | 'nonempty' | 'error'
-type Cell = { kind: Kind; title: string }
+type View = 'grid' | 'graph' | 'sankey'
 
 export default function App() {
   const [policy, setPolicy] = useState(fixture)
   const [entrypoint, setEntrypoint] = useState('data.authz.allow')
+  const [view, setView] = useState<View>('graph')
   const [xPath, setXPath] = useState('')
   const [yPath, setYPath] = useState('')
-  const [pinned, setPinned] = useState<Record<string, number>>({})
-  const [grid, setGrid] = useState<Cell[][]>([])
+  const [sankeySource, setSankeySource] = useState('')
+  const [rows, setRows] = useState<Row[]>([])
+  const [rules, setRules] = useState<RuleDef[]>([])
   const [status, setStatus] = useState('')
+  const [detail, setDetail] = useState('')
 
   const fields = useMemo(() => extractFields(policy), [policy])
-  const xField = fields.find((f) => f.path === xPath)
-  const yField = fields.find((f) => f.path === yPath)
+  const plan = useMemo(() => planSweep(fields), [fields])
+  const paths = plan.fields.map((f) => f.path)
 
-  // Keep the axis selections pointing at fields that still exist.
   useEffect(() => {
-    if (!fields.some((f) => f.path === xPath)) setXPath(fields[0]?.path ?? '')
-    if (!fields.some((f) => f.path === yPath)) setYPath(fields[1]?.path ?? '')
-  }, [fields, xPath, yPath])
+    if (!paths.includes(xPath)) setXPath(paths[0] ?? '')
+    if (!paths.includes(yPath)) setYPath(paths[1] ?? paths[0] ?? '')
+    if (!paths.includes(sankeySource)) setSankeySource(paths[0] ?? '')
+  }, [paths, xPath, yPath, sankeySource])
 
-  const held = fields.filter((f) => f.path !== xPath && f.path !== yPath)
-
-  // Re-sweep on any change, debounced so typing in the policy box is bearable.
+  // One sweep over the full cross product feeds all three views.
   const runId = useRef(0)
   useEffect(() => {
-    if (!xField || !yField) return
+    if (plan.fields.length === 0) return
     const id = ++runId.current
     const t = setTimeout(async () => {
-      setStatus('evaluating…')
-      const loadErr = await loadPolicy(policy)
+      setStatus('evaluating...')
+      const { source, rules: found } = instrument(policy)
+      const err = await loadPolicy(source)
       if (id !== runId.current) return
-      if (loadErr) {
-        setGrid([])
-        setStatus(loadErr)
+      if (err) {
+        setRows([])
+        setStatus(err)
         return
       }
+      setRules(found)
 
-      const rows = await Promise.all(
-        yField.values.map((yv) =>
-          Promise.all(
-            xField.values.map(async (xv) => {
-              const input = buildInput(fields, pinned, [xField.path, xv], [yField.path, yv])
-              const res = await evaluate(entrypoint, input)
-              return toCell(input, res)
-            }),
-          ),
-        ),
-      )
+      const { pkg, rule } = splitEntrypoint(entrypoint)
+      const combos = crossProduct(plan.fields)
+      const started = performance.now()
+      const out = await mapLimit(combos, 24, async (assignment): Promise<Row> => {
+        const input = assignmentToInput(assignment)
+        const res = await evaluatePackage(pkg, input)
+        if (!res.ok) return { assignment, input, decision: 'ERROR', fired: [] }
+        const value = res.doc[rule]
+        return {
+          assignment,
+          input,
+          decision: describe(value),
+          fired: found.filter((r) => res.doc[r.id] === true).map((r) => r.id),
+        }
+      })
       if (id !== runId.current) return
-      setGrid(rows)
-      setStatus(`${rows.length * (rows[0]?.length ?? 0)} evaluations`)
+      setRows(out)
+      const ms = Math.round(performance.now() - started)
+      setStatus(
+        `${out.length} evaluations in ${ms}ms` +
+          (plan.total < plan.full ? ` (capped from ${plan.full})` : ''),
+      )
     }, 250)
     return () => clearTimeout(t)
-  }, [policy, entrypoint, xPath, yPath, pinned, fields, xField, yField])
+  }, [policy, entrypoint, plan])
+
+  const valuesOf = useMemo(
+    () => new Map(plan.fields.map((f) => [f.path, f.values])),
+    [plan],
+  )
+  const tree = useMemo(
+    () => (rows.length ? induceTree(rows, paths, valuesOf) : null),
+    [rows, valuesOf],
+  )
+  const allowPaths = useMemo(
+    () => (tree ? enumeratePaths(tree, paths).filter((p) => p.decision === 'ALLOW') : []),
+    [tree],
+  )
+  // Reaching ALLOW on a value the policy never mentions is the sharper signal:
+  // it means an unanticipated principal gets in. Breadth holes are softer.
+  const unknownValueHoles = allowPaths.filter((p) => p.sentinels.length > 0)
+  const breadthHoles = allowPaths.filter((p) => p.sentinels.length === 0 && p.untested.length > 0)
+  const sankey = useMemo(
+    () => (rows.length && sankeySource ? buildSankey(rows, sankeySource, rules) : null),
+    [rows, sankeySource, rules],
+  )
+
+  const xField = plan.fields.find((f) => f.path === xPath)
+  const yField = plan.fields.find((f) => f.path === yPath)
 
   return (
     <main>
-      <h1>Decision Surface</h1>
+      <header>
+        <h1>Decision Surface</h1>
+        <nav>
+          {(['graph', 'sankey', 'grid'] as View[]).map((v) => (
+            <button key={v} className={view === v ? 'on' : ''} onClick={() => setView(v)}>
+              {v}
+            </button>
+          ))}
+        </nav>
+      </header>
 
       <div className="cols">
-        <label>
+        <label className="policy-box">
           policy
-          <textarea value={policy} onChange={(e) => setPolicy(e.target.value)} rows={16} />
+          <textarea value={policy} onChange={(e) => setPolicy(e.target.value)} rows={18} />
         </label>
         <div className="controls">
           <label>
             entrypoint
             <input value={entrypoint} onChange={(e) => setEntrypoint(e.target.value)} />
           </label>
-          <label>
-            X axis
-            <select value={xPath} onChange={(e) => setXPath(e.target.value)}>
-              {fields.map((f) => <option key={f.path} value={f.path}>{f.path}</option>)}
-            </select>
-          </label>
-          <label>
-            Y axis
-            <select value={yPath} onChange={(e) => setYPath(e.target.value)}>
-              {fields.map((f) => <option key={f.path} value={f.path}>{f.path}</option>)}
-            </select>
-          </label>
-          {held.map((f) => (
-            <label key={f.path}>
-              {f.path} <span className="dim">(held)</span>
-              <select
-                value={pinned[f.path] ?? 0}
-                onChange={(e) => setPinned({ ...pinned, [f.path]: Number(e.target.value) })}
-              >
-                {f.values.map((v, i) => <option key={i} value={i}>{showValue(v)}</option>)}
+
+          {view === 'grid' && (
+            <>
+              <label>
+                X axis
+                <select value={xPath} onChange={(e) => setXPath(e.target.value)}>
+                  {paths.map((p) => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </label>
+              <label>
+                Y axis
+                <select value={yPath} onChange={(e) => setYPath(e.target.value)}>
+                  {paths.map((p) => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </label>
+              <div className="note">
+                Other fields are collapsed: a cell is green if ANY value of them allows.
+              </div>
+            </>
+          )}
+
+          {view === 'sankey' && (
+            <label>
+              left column
+              <select value={sankeySource} onChange={(e) => setSankeySource(e.target.value)}>
+                {paths.map((p) => <option key={p} value={p}>{p}</option>)}
               </select>
             </label>
-          ))}
+          )}
+
           <div className="status">{status}</div>
+          {rules.length > 0 && (
+            <div className="rules">
+              {rules.map((r, i) => (
+                <div key={r.id} className="rule">
+                  <b>R{i + 1}</b> <span className="dim">line {r.line}</span>
+                  <pre>{r.body}</pre>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
-      {xField && yField && grid.length > 0 && (
-        <>
-          <div className="axis-name">x: {xField.path} &nbsp; y: {yField.path}</div>
-          <table className="grid">
-            <thead>
-              <tr>
-                <th />
-                {xField.values.map((v, i) => <th key={i}>{showValue(v)}</th>)}
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {grid.map((row, ri) => (
-                <tr key={ri}>
-                  <th>{showValue(yField.values[ri])}</th>
-                  {row.map((cell, ci) => (
-                    <td key={ci} className={`cell ${cell.kind}`} title={cell.title} />
-                  ))}
-                  <th>{showValue(yField.values[ri])}</th>
-                </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr>
-                <th />
-                {xField.values.map((v, i) => <th key={i}>{showValue(v)}</th>)}
-                <th />
-              </tr>
-            </tfoot>
-          </table>
-          <div className="legend">
-            <span className="cell true" /> true
-            <span className="cell false" /> false / undefined
-            <span className="cell empty" /> empty set
-            <span className="cell nonempty" /> non-empty set
-            <span className="cell error" /> error
-          </div>
-        </>
+      {unknownValueHoles.length > 0 && (
+        <div className="lint bad">
+          <b>
+            {unknownValueHoles.length} route{unknownValueHoles.length > 1 ? 's' : ''} grant ALLOW on a
+            value the policy never mentions
+          </b>
+          {unknownValueHoles.map((h, i) => (
+            <div key={i} className="lint-row">
+              {routeText(h.tests)}
+              {' -> ALLOW '}
+              <span className="dim">({h.count} inputs)</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {breadthHoles.length > 0 && (
+        <div className="lint">
+          <b>{breadthHoles.length} route{breadthHoles.length > 1 ? 's' : ''} reach ALLOW without testing every field</b>
+          {breadthHoles.map((h, i) => (
+            <div key={i} className="lint-row">
+              {routeText(h.tests)}
+              {' -> ALLOW, '}
+              <i>never checks {h.untested.map((p) => p.replace(/^input\./, '')).join(', ')}</i>
+              <span className="dim"> ({h.count} inputs)</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {view === 'graph' && tree && (
+        <section>
+          <h2>decision graph</h2>
+          <p className="note">
+            Split order is chosen by information gain. A black outline marks a route that
+            reaches ALLOW without ever testing every field.
+          </p>
+          <DecisionGraph
+            tree={tree}
+            totalFields={paths.length}
+            onHoverPath={(node) => setDetail(node ? sampleOf(node) : '')}
+          />
+          {detail && <pre className="detail">{detail}</pre>}
+        </section>
+      )}
+
+      {view === 'sankey' && sankey && (
+        <section>
+          <h2>inputs -&gt; rules -&gt; decision</h2>
+          <p className="note">
+            Ribbon width is how many swept inputs took that route. Purple means several rules
+            fired for the same input, which is redundant overlap.
+          </p>
+          <Sankey data={sankey} />
+        </section>
+      )}
+
+      {view === 'grid' && xField && yField && (
+        <section>
+          <h2>grid: {xField.path} x {yField.path}</h2>
+          <Grid rows={rows} xPath={xPath} yPath={yPath} xValues={xField.values} yValues={yField.values} />
+        </section>
       )}
 
       <h2>discovered fields ({fields.length})</h2>
@@ -157,50 +255,82 @@ export default function App() {
   )
 }
 
-/** Set input.a.b -> { a: { b: value } }. An undefined value means "absent". */
-function setPath(obj: Record<string, any>, path: string, value: Value) {
-  if (value === undefined) return
-  const parts = path.replace(/^input\./, '').split('.')
-  let cur = obj
-  for (const part of parts.slice(0, -1)) {
-    if (typeof cur[part] !== 'object' || cur[part] === null) cur[part] = {}
-    cur = cur[part]
+/**
+ * Grid over two axes. Every other field is collapsed by asking whether ANY of
+ * its values allows, which is the "is this reachable at all" question.
+ */
+function Grid({
+  rows, xPath, yPath, xValues, yValues,
+}: {
+  rows: Row[]
+  xPath: string
+  yPath: string
+  xValues: Value[]
+  yValues: Value[]
+}) {
+  const key = (a: Value, b: Value) => `${JSON.stringify(a)}|${JSON.stringify(b)}`
+  const buckets = new Map<string, Row[]>()
+  for (const r of rows) {
+    const k = key(r.assignment[xPath], r.assignment[yPath])
+    const list = buckets.get(k) ?? []
+    list.push(r)
+    buckets.set(k, list)
   }
-  cur[parts[parts.length - 1]] = value
+
+  return (
+    <table className="grid">
+      <thead>
+        <tr>
+          <th />
+          {xValues.map((v, i) => <th key={i}>{showValue(v)}</th>)}
+        </tr>
+      </thead>
+      <tbody>
+        {yValues.map((yv, ri) => (
+          <tr key={ri}>
+            <th>{showValue(yv)}</th>
+            {xValues.map((xv, ci) => {
+              const group = buckets.get(key(xv, yv)) ?? []
+              const anyAllow = group.some((r) => r.decision === 'ALLOW')
+              const allAllow = group.length > 0 && group.every((r) => r.decision === 'ALLOW')
+              const cls = group.length === 0 ? 'empty' : anyAllow ? (allAllow ? 'true' : 'partial') : 'false'
+              const sample = group[0]
+              return (
+                <td
+                  key={ci}
+                  className={`cell ${cls}`}
+                  title={
+                    sample
+                      ? `${JSON.stringify(sample.input, null, 2)}\n\n${group.filter((r) => r.decision === 'ALLOW').length}/${group.length} combinations ALLOW`
+                      : 'no data'
+                  }
+                />
+              )
+            })}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
 }
 
-function buildInput(
-  fields: Field[],
-  pinned: Record<string, number>,
-  x: [string, Value],
-  y: [string, Value],
-): Record<string, unknown> {
-  const input: Record<string, any> = {}
-  for (const f of fields) {
-    if (f.path === x[0] || f.path === y[0]) continue
-    setPath(input, f.path, f.values[pinned[f.path] ?? 0])
-  }
-  setPath(input, x[0], x[1])
-  setPath(input, y[0], y[1])
-  return input
+function routeText(tests: { path: string; value: Value }[]): string {
+  if (!tests.length) return '(any input)'
+  return tests.map((t) => `${t.path.replace(/^input\./, '')}=${showValue(t.value)}`).join(' AND ')
 }
 
-function toCell(input: unknown, res: EvalResult): Cell {
-  const kind = classify(res)
-  const shown = res.ok ? (res.value === undefined ? 'undefined' : JSON.stringify(res.value)) : res.error
-  return { kind, title: `${JSON.stringify(input, null, 2)}\n\n=> ${shown}` }
+function describe(value: unknown): string {
+  if (value === true) return 'ALLOW'
+  if (value === false || value === undefined || value === null) return 'DENY'
+  if (Array.isArray(value)) return value.length ? `${value.length} items` : 'empty'
+  if (typeof value === 'object') return Object.keys(value as object).length ? 'non-empty' : 'empty'
+  return JSON.stringify(value)
 }
 
-function classify(res: EvalResult): Kind {
-  if (!res.ok) return 'error'
-  const v = res.value
-  if (v === true) return 'true'
-  if (v === false || v === undefined || v === null) return 'false'
-  if (Array.isArray(v)) return v.length ? 'nonempty' : 'empty'
-  if (typeof v === 'object') return Object.keys(v as object).length ? 'nonempty' : 'empty'
-  return 'nonempty'
+function sampleOf(node: Tree): string {
+  if (node.kind !== 'leaf' || !node.rows.length) return ''
+  const r = node.rows[0]
+  return `example input (1 of ${node.rows.length}):\n${JSON.stringify(r.input, null, 2)}\n\n=> ${r.decision}`
 }
 
-export function showValue(v: Value): string {
-  return v === undefined ? '<absent>' : typeof v === 'string' ? v : JSON.stringify(v)
-}
+export { decisionColor }
