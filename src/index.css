@@ -1,14 +1,28 @@
 body { font-family: ui-monospace, Menlo, monospace; margin: 0; background: #fff; color: #111; }
 main { padding: 16px; }
 h1 { font-size: 16px; margin: 0 0 12px; }
-.cols { display: flex; gap: 12px; }
-.cols label { flex: 1; }
+h2 { font-size: 13px; margin: 20px 0 6px; }
+.cols { display: flex; gap: 16px; align-items: flex-start; }
+.cols > label { flex: 1; }
+.controls { flex: 0 0 300px; }
 label { display: block; font-size: 12px; margin-bottom: 8px; }
-textarea, input { width: 100%; font-family: inherit; font-size: 12px; box-sizing: border-box; }
-.row { display: flex; gap: 12px; align-items: flex-end; margin: 8px 0; }
-.row label { flex: 0 0 320px; margin: 0; }
-button { padding: 6px 14px; font-family: inherit; }
-pre { background: #f4f4f4; padding: 10px; white-space: pre-wrap; font-size: 12px; }
-h2 { font-size: 13px; margin: 16px 0 6px; }
+textarea, input, select { width: 100%; font-family: inherit; font-size: 12px; box-sizing: border-box; }
+.dim { color: #888; }
+.status { font-size: 11px; color: #666; white-space: pre-wrap; margin-top: 8px; }
+
+.axis-name { font-size: 12px; margin: 18px 0 6px; }
+table.grid { border-collapse: collapse; }
+table.grid th { font-size: 11px; font-weight: normal; color: #444; padding: 3px 6px; white-space: nowrap; }
+table.grid thead th, table.grid tfoot th { text-align: center; }
+table.grid tbody th { text-align: right; }
+td.cell, span.cell { width: 44px; height: 34px; border: 1px solid #fff; }
+span.cell { display: inline-block; width: 16px; height: 12px; vertical-align: middle; margin: 0 4px 0 12px; border: 1px solid #999; }
+.true { background: #4caf50; }
+.false { background: #e53935; }
+.empty { background: #f48fb1; }
+.nonempty { background: #fb8c00; }
+.error { background: #9e9e9e; }
+.legend { font-size: 11px; margin-top: 10px; color: #444; }
+
 table.fields { border-collapse: collapse; font-size: 12px; }
 table.fields td { border: 1px solid #ddd; padding: 3px 8px; vertical-align: top; }
