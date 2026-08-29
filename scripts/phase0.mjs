@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 const OPA = 'http://localhost:8181';
 const policy = readFileSync(new URL('../src/fixtures/authz.rego', import.meta.url), 'utf8');
 
-const put = await fetch(`${OPA}/v1/policies/authz`, {
+const put = await fetch(`${OPA}/v1/policies/spike`, {
   method: 'PUT',
   headers: { 'Content-Type': 'text/plain' },
   body: policy,

@@ -25,3 +25,8 @@ and evaluated via `POST /v1/data/<path>`.
 ## Phase 0 proof
 
     node scripts/phase0.mjs
+
+Note: the OPA server keeps uploaded policies until deleted. Everything here
+uses the single policy id `spike`, so repeated uploads replace rather than
+stack. If you ever upload under another id you'll get
+`multiple default rules ... found`.
