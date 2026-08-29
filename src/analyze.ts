@@ -11,31 +11,70 @@ export type Row = {
   fired: string[]           // ids of rules whose body was satisfied
 }
 
-export const MAX_COMBOS = 400
+export const MAX_COMBOS = 1200
 
-/** Trim per-field value lists until the cross product fits the budget. */
-export function planSweep(fields: Field[]): { fields: Field[]; total: number; full: number } {
-  const full = fields.reduce((n, f) => n * f.values.length, 1)
+const size = (fields: Field[]) => fields.reduce((n, f) => n * f.values.length, 1)
+
+/**
+ * Trim per-field value lists until the cross product fits the budget.
+ *
+ * The LAST value of every field is the one that reveals unmentioned inputs -
+ * the `<<other>>` sentinel for strings, `<absent>` for booleans - so trimming
+ * drops from the middle and never from the end. Popping the tail (as this used
+ * to) quietly removed exactly the value the tool exists to test.
+ *
+ * With enough fields even two values each overflows the budget, so whatever is
+ * left over is sampled rather than silently exceeded.
+ */
+export function planSweep(fields: Field[]): {
+  fields: Field[]
+  total: number
+  full: number
+  sampled: boolean
+} {
+  const full = size(fields)
   const plan = fields.map((f) => ({ ...f, values: [...f.values] }))
-  let total = full
-  while (total > MAX_COMBOS) {
-    // Shrink whichever field currently contributes the most breadth.
+
+  while (size(plan) > MAX_COMBOS) {
     const widest = plan.reduce((a, b) => (b.values.length > a.values.length ? b : a))
     if (widest.values.length <= 2) break
-    widest.values.pop()
-    total = plan.reduce((n, f) => n * f.values.length, 1)
+    widest.values.splice(widest.values.length - 2, 1)  // keep first and last
   }
-  return { fields: plan, total, full }
+
+  const trimmed = size(plan)
+  const sampled = trimmed > MAX_COMBOS
+  return { fields: plan, total: sampled ? MAX_COMBOS : trimmed, full, sampled }
 }
 
-export function crossProduct(fields: Field[]): Record<string, Value>[] {
-  let out: Record<string, Value>[] = [{}]
-  for (const f of fields) {
-    const next: Record<string, Value>[] = []
-    for (const partial of out) {
-      for (const v of f.values) next.push({ ...partial, [f.path]: v })
+export function crossProduct(fields: Field[], limit = Infinity): Record<string, Value>[] {
+  const total = size(fields)
+  if (total <= limit) {
+    let out: Record<string, Value>[] = [{}]
+    for (const f of fields) {
+      const next: Record<string, Value>[] = []
+      for (const partial of out) {
+        for (const v of f.values) next.push({ ...partial, [f.path]: v })
+      }
+      out = next
     }
-    out = next
+    return out
+  }
+  // Too many to enumerate: walk the space at a fixed stride so the sample is
+  // deterministic and spread across the whole product rather than clustered.
+  const out: Record<string, Value>[] = []
+  const stride = total / limit
+  for (let i = 0; i < limit; i++) out.push(decode(fields, Math.floor(i * stride)))
+  return out
+}
+
+/** Mixed-radix decode: turn a flat index into one assignment. */
+function decode(fields: Field[], index: number): Record<string, Value> {
+  const out: Record<string, Value> = {}
+  let rest = index
+  for (let i = fields.length - 1; i >= 0; i--) {
+    const f = fields[i]
+    out[f.path] = f.values[rest % f.values.length]
+    rest = Math.floor(rest / f.values.length)
   }
   return out
 }

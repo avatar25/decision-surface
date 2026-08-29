@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import fixture from './fixtures/authz.rego?raw'
+import authzFixture from './fixtures/authz.rego?raw'
+import gatewayFixture from './fixtures/gateway.rego?raw'
 import { loadPolicy, evaluatePackage, splitEntrypoint } from './opa'
 import { extractFields, type Value } from './extract'
 import { instrument, type RuleDef } from './instrument'
@@ -11,6 +12,7 @@ import {
   induceTree,
   mapLimit,
   keyOf,
+  MAX_COMBOS,
   planSweep,
   type Row,
   type Tree,
@@ -20,8 +22,13 @@ import { showValue } from './show'
 
 type View = 'grid' | 'graph' | 'sankey'
 
+const EXAMPLES = [
+  { name: 'authz (3 rules)', policy: authzFixture, entrypoint: 'data.authz.allow' },
+  { name: 'gateway (15 rules)', policy: gatewayFixture, entrypoint: 'data.gateway.allow' },
+]
+
 export default function App() {
-  const [policy, setPolicy] = useState(fixture)
+  const [policy, setPolicy] = useState(EXAMPLES[0].policy)
   const [entrypoint, setEntrypoint] = useState('data.authz.allow')
   const [view, setView] = useState<View>('graph')
   const [xPath, setXPath] = useState('')
@@ -61,7 +68,7 @@ export default function App() {
       setRules(found)
 
       const { pkg, rule } = splitEntrypoint(entrypoint)
-      const combos = crossProduct(plan.fields)
+      const combos = crossProduct(plan.fields, MAX_COMBOS)
       const started = performance.now()
       const out = await mapLimit(combos, 24, async (assignment): Promise<Row> => {
         const input = assignmentToInput(assignment)
@@ -80,7 +87,8 @@ export default function App() {
       const ms = Math.round(performance.now() - started)
       setStatus(
         `${out.length} evaluations in ${ms}ms` +
-          (plan.total < plan.full ? ` (capped from ${plan.full})` : ''),
+          (plan.full > out.length ? ` of ${plan.full.toLocaleString()} possible` : '') +
+          (plan.sampled ? ' - SAMPLED, graph may be incomplete' : ''),
       )
     }, 250)
     return () => clearTimeout(t)
@@ -129,6 +137,21 @@ export default function App() {
           <textarea value={policy} onChange={(e) => setPolicy(e.target.value)} rows={18} />
         </label>
         <div className="controls">
+          <label>
+            example
+            <select
+              value={EXAMPLES.find((e) => e.policy === policy)?.name ?? ''}
+              onChange={(e) => {
+                const ex = EXAMPLES.find((x) => x.name === e.target.value)
+                if (!ex) return
+                setPolicy(ex.policy)
+                setEntrypoint(ex.entrypoint)
+              }}
+            >
+              <option value="">(edited)</option>
+              {EXAMPLES.map((ex) => <option key={ex.name} value={ex.name}>{ex.name}</option>)}
+            </select>
+          </label>
           <label>
             entrypoint
             <input value={entrypoint} onChange={(e) => setEntrypoint(e.target.value)} />

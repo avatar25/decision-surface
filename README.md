@@ -53,6 +53,14 @@ several rules gets its own combined node, so redundant overlap is visible.
 or left at `(any)`, which collapses that dimension and hatches cells whose
 outcome depends on it.
 
+## Examples
+
+The **example** dropdown loads either fixture:
+
+  - `authz` - 3 rules, 3 fields, 27 combinations. The small demo.
+  - `gateway` - 15 rules, 10 fields, 131,220 combinations. Exercises value
+    capping, sampling, and a deep induced tree.
+
 ## Known soft spot
 
 The decision graph is induced from sampled evaluations, not from OPA's
