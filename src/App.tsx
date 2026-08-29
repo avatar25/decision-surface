@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import fixture from './fixtures/authz.rego?raw'
 import { loadPolicy, evaluate } from './opa'
+import { extractFields, type Value } from './extract'
 
 const DEFAULT_INPUT = JSON.stringify(
   { role: 'guest', action: 'read', resource: { confidential: false } },
@@ -13,6 +14,8 @@ export default function App() {
   const [inputText, setInputText] = useState(DEFAULT_INPUT)
   const [entrypoint, setEntrypoint] = useState('data.authz.allow')
   const [output, setOutput] = useState('')
+
+  const fields = useMemo(() => extractFields(policy), [policy])
 
   async function run() {
     let input: unknown
@@ -58,6 +61,23 @@ export default function App() {
         <button onClick={run}>Evaluate</button>
       </div>
       <pre>{output}</pre>
+
+      <h2>discovered fields ({fields.length})</h2>
+      <table className="fields">
+        <tbody>
+          {fields.map((f) => (
+            <tr key={f.path}>
+              <td>{f.path}</td>
+              <td>{f.type}</td>
+              <td>{f.values.map(showValue).join('  ')}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </main>
   )
+}
+
+export function showValue(v: Value): string {
+  return v === undefined ? '<absent>' : JSON.stringify(v)
 }

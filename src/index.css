@@ -9,3 +9,6 @@ textarea, input { width: 100%; font-family: inherit; font-size: 12px; box-sizing
 .row label { flex: 0 0 320px; margin: 0; }
 button { padding: 6px 14px; font-family: inherit; }
 pre { background: #f4f4f4; padding: 10px; white-space: pre-wrap; font-size: 12px; }
+h2 { font-size: 13px; margin: 16px 0 6px; }
+table.fields { border-collapse: collapse; font-size: 12px; }
+table.fields td { border: 1px solid #ddd; padding: 3px 8px; vertical-align: top; }
