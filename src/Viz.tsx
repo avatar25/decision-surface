@@ -1,6 +1,5 @@
 // Hand-rolled SVG for the decision graph and the Sankey. No chart library.
 
-import type { Value } from './extract'
 import type { SankeyData, Tree } from './analyze'
 import { showValue } from './show'
 
@@ -246,8 +245,4 @@ function ribbonColor(id: string): string {
   if (id.startsWith('rule:') && id.includes('+')) return '#8e24aa'  // overlap
   if (id.startsWith('rule:')) return '#3f8fd0'
   return '#b0bec5'
-}
-
-export function valueLabel(v: Value): string {
-  return showValue(v)
 }

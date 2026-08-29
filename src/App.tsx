@@ -10,11 +10,12 @@ import {
   enumeratePaths,
   induceTree,
   mapLimit,
+  keyOf,
   planSweep,
   type Row,
   type Tree,
 } from './analyze'
-import { DecisionGraph, Sankey, decisionColor } from './Viz'
+import { DecisionGraph, Sankey } from './Viz'
 import { showValue } from './show'
 
 type View = 'grid' | 'graph' | 'sankey'
@@ -26,6 +27,7 @@ export default function App() {
   const [xPath, setXPath] = useState('')
   const [yPath, setYPath] = useState('')
   const [sankeySource, setSankeySource] = useState('')
+  const [pins, setPins] = useState<Record<string, string>>({})
   const [rows, setRows] = useState<Row[]>([])
   const [rules, setRules] = useState<RuleDef[]>([])
   const [status, setStatus] = useState('')
@@ -146,8 +148,25 @@ export default function App() {
                   {paths.map((p) => <option key={p} value={p}>{p}</option>)}
                 </select>
               </label>
+              {plan.fields
+                .filter((f) => f.path !== xPath && f.path !== yPath)
+                .map((f) => (
+                  <label key={f.path}>
+                    {f.path.replace(/^input\./, '')} <span className="dim">(held)</span>
+                    <select
+                      value={pins[f.path] ?? '*'}
+                      onChange={(e) => setPins({ ...pins, [f.path]: e.target.value })}
+                    >
+                      <option value="*">(any)</option>
+                      {f.values.map((v, i) => (
+                        <option key={i} value={keyOf(v)}>{showValue(v)}</option>
+                      ))}
+                    </select>
+                  </label>
+                ))}
               <div className="note">
-                Other fields are collapsed: a cell is green if ANY value of them allows.
+                A held field set to (any) collapses that dimension: the cell is hatched when
+                some of its values allow and others deny.
               </div>
             </>
           )}
@@ -235,7 +254,17 @@ export default function App() {
       {view === 'grid' && xField && yField && (
         <section>
           <h2>grid: {xField.path} x {yField.path}</h2>
-          <Grid rows={rows} xPath={xPath} yPath={yPath} xValues={xField.values} yValues={yField.values} />
+          <Grid
+            rows={rows.filter((r) =>
+              Object.entries(pins).every(
+                ([path, want]) => want === '*' || keyOf(r.assignment[path]) === want,
+              ),
+            )}
+            xPath={xPath}
+            yPath={yPath}
+            xValues={xField.values}
+            yValues={yField.values}
+          />
         </section>
       )}
 
@@ -332,5 +361,3 @@ function sampleOf(node: Tree): string {
   const r = node.rows[0]
   return `example input (1 of ${node.rows.length}):\n${JSON.stringify(r.input, null, 2)}\n\n=> ${r.decision}`
 }
-
-export { decisionColor }
