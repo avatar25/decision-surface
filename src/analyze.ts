@@ -11,7 +11,13 @@ export type Row = {
   fired: string[]           // ids of rules whose body was satisfied
 }
 
-export const MAX_COMBOS = 1200
+export const MAX_COMBOS = 4000
+
+/**
+ * Never trim a field below this many values. Three is the smallest number that
+ * can hold a boundary probe (n-1, n, n+1) or a value plus its sentinel.
+ */
+export const MIN_VALUES = 3
 
 const size = (fields: Field[]) => fields.reduce((n, f) => n * f.values.length, 1)
 
@@ -23,8 +29,15 @@ const size = (fields: Field[]) => fields.reduce((n, f) => n * f.values.length, 1
  * drops from the middle and never from the end. Popping the tail (as this used
  * to) quietly removed exactly the value the tool exists to test.
  *
- * With enough fields even two values each overflows the budget, so whatever is
- * left over is sampled rather than silently exceeded.
+ * Trimming never takes a field below MIN_VALUES. Squeezing to two kept only
+ * the first and the sentinel, which threw away every boundary that
+ * fieldsFromResidual had just constructed (18 from `age >= 18`, 100 from
+ * `rate < 100`) and every middle alternative (`editor`, `POST`, `internal`).
+ * On the gateway fixture that left 5 of 15 rules unable to fire at all.
+ *
+ * `sampled` is true whenever the sweep is not the full cross product, however
+ * that came about. It previously reported false after trimming succeeded, so
+ * a sweep covering 0.8% of the space presented itself as complete.
  */
 export function planSweep(fields: Field[]): {
   fields: Field[]
@@ -37,13 +50,13 @@ export function planSweep(fields: Field[]): {
 
   while (size(plan) > MAX_COMBOS) {
     const widest = plan.reduce((a, b) => (b.values.length > a.values.length ? b : a))
-    if (widest.values.length <= 2) break
+    if (widest.values.length <= MIN_VALUES) break
     widest.values.splice(widest.values.length - 2, 1)  // keep first and last
   }
 
   const trimmed = size(plan)
-  const sampled = trimmed > MAX_COMBOS
-  return { fields: plan, total: sampled ? MAX_COMBOS : trimmed, full, sampled }
+  const total = Math.min(trimmed, MAX_COMBOS)
+  return { fields: plan, total, full, sampled: total < full }
 }
 
 export function crossProduct(fields: Field[], limit = Infinity): Record<string, Value>[] {
@@ -79,21 +92,35 @@ function decode(fields: Field[], index: number): Record<string, Value> {
   return out
 }
 
-/** input.a.b to { a: { b: v } }. undefined means "leave the field absent". */
+/**
+ * input.a.b to { a: { b: v } }. undefined means "leave the field absent".
+ *
+ * The residual can name a collection element as `input.roles.[_]` (from
+ * `some r in input.roles`). That segment is an ITERATION marker, not a key:
+ * it has to become a one-element array, or `some r in input.roles` can never
+ * be satisfied and the whole branch reads as unreachable.
+ */
 export function assignmentToInput(assignment: Record<string, Value>): Record<string, unknown> {
   const input: Record<string, any> = {}
   for (const [path, value] of Object.entries(assignment)) {
     if (value === undefined) continue
     const parts = path.replace(/^input\./, '').split('.')
+    const iter = parts[parts.length - 1] === ITER
+    const keys = iter ? parts.slice(0, -1) : parts
+    if (keys.length === 0) continue
     let cur = input
-    for (const p of parts.slice(0, -1)) {
-      if (typeof cur[p] !== 'object' || cur[p] === null) cur[p] = {}
+    for (const p of keys.slice(0, -1)) {
+      if (typeof cur[p] !== 'object' || cur[p] === null || Array.isArray(cur[p])) cur[p] = {}
       cur = cur[p]
     }
-    cur[parts[parts.length - 1]] = value
+    const leaf = keys[keys.length - 1]
+    cur[leaf] = iter ? [value] : value
   }
   return input
 }
+
+/** Path segment the residual uses for a collection element. */
+export const ITER = '[_]'
 
 /** Run `work` over items with bounded concurrency, preserving order. */
 export async function mapLimit<T, R>(items: T[], limit: number, work: (t: T) => Promise<R>): Promise<R[]> {

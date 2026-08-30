@@ -42,7 +42,10 @@ export function instrument(policy: string): { source: string; rules: RuleDef[] }
     }
 
     const inline = trimmed.match(HEAD_INLINE)
-    if (inline && !inline[2].includes('{')) {
+    // A set literal in an inline body (`x if input.m in {"GET","HEAD"}`) is
+    // balanced and perfectly legal. Rejecting every `{` dropped those rules
+    // silently - two of them in the gateway fixture.
+    if (inline && balanced(inline[2])) {
       push(inline[1], i + 1, inline[2], `{\n    ${inline[2]}\n}`)
     }
   }
@@ -59,16 +62,43 @@ export function instrument(policy: string): { source: string; rules: RuleDef[] }
   return { source, rules }
 }
 
-/** Index of the line closing a rule block opened at `open`. */
+/**
+ * Index of the line closing a rule block opened at `open`.
+ *
+ * Braces inside string literals and comments do not nest. Counting them (as
+ * this used to) desynchronised the depth on any body containing an unbalanced
+ * brace in a string, and the whole rule vanished from attribution.
+ */
 function findClose(lines: string[], open: number): number {
   let depth = 0
   for (let i = open; i < lines.length; i++) {
-    for (const ch of lines[i]) {
-      if (ch === '{') depth++
-      else if (ch === '}') depth--
-    }
+    depth += netBraces(lines[i])
     if (depth === 0 && i > open) return i
     if (depth === 0 && i === open) return -1
   }
   return -1
+}
+
+/** Brace delta of a line, ignoring string literals and trailing comments. */
+function netBraces(line: string): number {
+  let depth = 0
+  let inStr = false
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    if (inStr) {
+      if (c === '\\') i++
+      else if (c === '"') inStr = false
+      continue
+    }
+    if (c === '"') inStr = true
+    else if (c === '#') break
+    else if (c === '{') depth++
+    else if (c === '}') depth--
+  }
+  return depth
+}
+
+/** True when a fragment has no unclosed brace outside a string. */
+function balanced(text: string): boolean {
+  return netBraces(text) === 0
 }

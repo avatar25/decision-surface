@@ -3,6 +3,8 @@ import authzFixture from './fixtures/authz.rego?raw'
 import gatewayFixture from './fixtures/gateway.rego?raw'
 import { loadPolicy, evaluatePackage, splitEntrypoint } from './opa'
 import { extractFields, type Value } from './extract'
+import { compileResidual, type Residual } from './compile'
+import { fieldsFromResidual, sweepable, witnesses, witnessFor, type DerivedField } from './fields'
 import { instrument, type RuleDef } from './instrument'
 import {
   assignmentToInput,
@@ -20,16 +22,16 @@ import {
 import { DecisionGraph, Sankey } from './Viz'
 import { showValue } from './show'
 
-type View = 'grid' | 'graph' | 'sankey'
+type View = 'branches' | 'grid' | 'graph' | 'sankey'
 
 const EXAMPLES = [
-  { name: 'authz (3 rules)', policy: authzFixture, entrypoint: 'data.authz.allow' },
   { name: 'gateway (15 rules)', policy: gatewayFixture, entrypoint: 'data.gateway.allow' },
+  { name: 'authz (3 rules)', policy: authzFixture, entrypoint: 'data.authz.allow' },
 ]
 
 export default function App() {
   const [policy, setPolicy] = useState(EXAMPLES[0].policy)
-  const [entrypoint, setEntrypoint] = useState('data.authz.allow')
+  const [entrypoint, setEntrypoint] = useState(EXAMPLES[0].entrypoint)
   const [view, setView] = useState<View>('graph')
   const [xPath, setXPath] = useState('')
   const [yPath, setYPath] = useState('')
@@ -39,9 +41,21 @@ export default function App() {
   const [rules, setRules] = useState<RuleDef[]>([])
   const [status, setStatus] = useState('')
   const [detail, setDetail] = useState('')
+  const [residual, setResidual] = useState<Residual | null>(null)
+  const [residualError, setResidualError] = useState('')
+  const [loadToken, setLoadToken] = useState(0)
 
-  const fields = useMemo(() => extractFields(policy), [policy])
-  const plan = useMemo(() => planSweep(fields), [fields])
+  // Fields come from OPA's residual when partial evaluation succeeds. The
+  // regex scan is only a fallback for the case where it does not - it cannot
+  // see through helper rules, bindings, or bracket refs.
+  const fields: DerivedField[] = useMemo(
+    () =>
+      residual
+        ? fieldsFromResidual(residual)
+        : extractFields(policy).map((f) => ({ ...f, reasons: ['regex'], opaque: false })),
+    [residual, policy],
+  )
+  const plan = useMemo(() => planSweep(sweepable(fields)), [fields])
   const paths = plan.fields.map((f) => f.path)
 
   useEffect(() => {
@@ -50,25 +64,52 @@ export default function App() {
     if (!paths.includes(sankeySource)) setSankeySource(paths[0] ?? '')
   }, [paths, xPath, yPath, sankeySource])
 
-  // One sweep over the full cross product feeds all three views.
+  // Stage 1: upload the instrumented policy, then ask OPA for the residual.
+  // This must finish before any sweep, because both need the policy loaded.
   const runId = useRef(0)
   useEffect(() => {
-    if (plan.fields.length === 0) return
     const id = ++runId.current
     const t = setTimeout(async () => {
-      setStatus('evaluating...')
+      setStatus('compiling...')
       const { source, rules: found } = instrument(policy)
       const err = await loadPolicy(source)
       if (id !== runId.current) return
       if (err) {
         setRows([])
+        setResidual(null)
+        setResidualError('')
         setStatus(err)
         return
       }
       setRules(found)
 
+      const outcome = await compileResidual(entrypoint)
+      if (id !== runId.current) return
+      if (outcome.ok) {
+        setResidual(outcome.residual)
+        setResidualError('')
+      } else {
+        // Fall back to the regex scan, and say so rather than pretending.
+        setResidual(null)
+        setResidualError(outcome.error)
+      }
+      setLoadToken(id)
+    }, 250)
+    return () => clearTimeout(t)
+  }, [policy, entrypoint])
+
+  // Stage 2: one sweep over the cross product feeds grid, graph and sankey.
+  useEffect(() => {
+    if (loadToken === 0 || plan.fields.length === 0) return
+    const id = loadToken
+    let cancelled = false
+    ;(async () => {
+      setStatus('evaluating...')
       const { pkg, rule } = splitEntrypoint(entrypoint)
-      const combos = crossProduct(plan.fields, MAX_COMBOS)
+      // Witnesses first: one input per residual branch, so every route is
+      // exercised even when the sampler cannot cover the whole cross product.
+      const seeds = residual ? witnesses(residual.branches) : []
+      const combos = [...seeds, ...crossProduct(plan.fields, MAX_COMBOS)]
       const started = performance.now()
       const out = await mapLimit(combos, 24, async (assignment): Promise<Row> => {
         const input = assignmentToInput(assignment)
@@ -79,20 +120,21 @@ export default function App() {
           assignment,
           input,
           decision: describe(value),
-          fired: found.filter((r) => res.doc[r.id] === true).map((r) => r.id),
+          fired: rules.filter((r) => res.doc[r.id] === true).map((r) => r.id),
         }
       })
-      if (id !== runId.current) return
+      if (cancelled || id !== runId.current) return
       setRows(out)
       const ms = Math.round(performance.now() - started)
       setStatus(
         `${out.length} evaluations in ${ms}ms` +
+          (seeds.length ? ` (${seeds.length} branch witnesses + sweep)` : '') +
           (plan.full > out.length ? ` of ${plan.full.toLocaleString()} possible` : '') +
-          (plan.sampled ? ' - SAMPLED, graph may be incomplete' : ''),
+          (plan.sampled ? ' - SAMPLED, the sweep views are incomplete' : ''),
       )
-    }, 250)
-    return () => clearTimeout(t)
-  }, [policy, entrypoint, plan])
+    })()
+    return () => { cancelled = true }
+  }, [loadToken, plan, entrypoint, rules, residual])
 
   const valuesOf = useMemo(
     () => new Map(plan.fields.map((f) => [f.path, f.values])),
@@ -123,13 +165,29 @@ export default function App() {
       <header>
         <h1>Decision Surface</h1>
         <nav>
-          {(['graph', 'sankey', 'grid'] as View[]).map((v) => (
+          {(['branches', 'graph', 'sankey', 'grid'] as View[]).map((v) => (
             <button key={v} className={view === v ? 'on' : ''} onClick={() => setView(v)}>
               {v}
             </button>
           ))}
         </nav>
       </header>
+
+      <p className={residual ? 'provenance exact' : 'provenance guess'}>
+        {residual ? (
+          <>
+            <strong>exact</strong> - {residual.branches.length} branches from OPA partial
+            evaluation (<code>/v1/compile</code>). Fields and routes are derived from the
+            policy's semantics, not sampled.
+          </>
+        ) : (
+          <>
+            <strong>approximate</strong> - partial evaluation unavailable, so fields come
+            from the regex scan and may be incomplete.
+            {residualError ? ` (${residualError})` : ''}
+          </>
+        )}
+      </p>
 
       <div className="cols">
         <label className="policy-box">
@@ -274,6 +332,16 @@ export default function App() {
         </section>
       )}
 
+      {view === 'branches' && (
+        <section>
+          <h2>routes to ALLOW ({residual ? residual.branches.length : 0})</h2>
+          {!residual && <p className="note">Needs partial evaluation. Not available for this policy.</p>}
+          {residual?.alwaysFalse && <p className="note">The decision is unreachable: no branch satisfies it.</p>}
+          {residual?.alwaysTrue && <p className="note">The decision holds unconditionally.</p>}
+          {residual && <Branches residual={residual} />}
+        </section>
+      )}
+
       {view === 'grid' && xField && yField && (
         <section>
           <h2>grid: {xField.path} x {yField.path}</h2>
@@ -295,15 +363,73 @@ export default function App() {
       <table className="fields">
         <tbody>
           {fields.map((f) => (
-            <tr key={f.path}>
+            <tr key={f.path} className={f.values.length === 0 ? 'opaque' : ''}>
               <td>{f.path}</td>
               <td>{f.type}</td>
-              <td>{f.values.map(showValue).join('  ')}</td>
+              <td className="reasons">{f.reasons.join(' ')}</td>
+              <td>
+                {f.values.length
+                  ? f.values.map(showValue).join('  ')
+                  : 'no enumerable values - constrained only by a builtin'}
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
     </main>
+  )
+}
+
+/**
+ * The residual's branches ARE the routes to the decision - one per way the
+ * policy can say yes. Nothing here is induced from samples, so a route that
+ * appears is reachable and a field that is absent is genuinely unconstrained
+ * on that route.
+ */
+function Branches({ residual }: { residual: Residual }) {
+  const all = residual.paths
+  return (
+    <ol className="branches">
+      {residual.branches.map((b, i) => {
+        const constrained = new Set(
+          b.constraints.flatMap((c) => (c.kind === 'opaque' ? c.paths : [c.path])),
+        )
+        const unconstrained = all.filter((p) => !constrained.has(p))
+        const opaque = b.constraints.filter((c) => c.kind === 'opaque')
+        const witness = witnessFor(b)
+        return (
+          <li key={i}>
+            <ul className="constraints">
+              {b.constraints.map((c, j) => (
+                <li key={j} className={c.kind === 'opaque' ? 'opaque' : ''}>
+                  <code>{c.text}</code>
+                  {c.kind === 'opaque' && <span className="tag">not enumerable</span>}
+                </li>
+              ))}
+            </ul>
+            {unconstrained.length > 0 && (
+              <p className="lint">
+                unconstrained on this route: {unconstrained.map((p) => <code key={p}>{p}</code>)}
+              </p>
+            )}
+            {opaque.length > 0 && (
+              <p className="lint">
+                needs value synthesis: {opaque.map((c, k) => <code key={k}>{c.builtin}</code>)}
+              </p>
+            )}
+            {witness ? (
+              <p className="witness">
+                witness: <code>{JSON.stringify(assignmentToInput(witness))}</code>
+              </p>
+            ) : (
+              <p className="lint">
+                no witness: a constraint on this route cannot be satisfied by construction
+              </p>
+            )}
+          </li>
+        )
+      })}
+    </ol>
   )
 }
 
